@@ -4,11 +4,11 @@ One of the more tricky problems when coding for an embedded system is ensuring t
 
 Most microprocessor control units (MCUs) have limited amounts of RAM; on a general-purpose machine, for example a Linux desktop, it would in theory be possible for a potential stack overflow to be recognised and for additional stack space to be allocated, and even if that's not possible, a large stack can be pre-allocated using virtual memory without any immediate cost.
 
-This can't be done if the MCU only has real memory. Stack overflow may be caught or not. If you're lucky there'll be enough information left behind for you to use the debugger to find the reason for the resulting crash straight away, if not it could take a while. Under [FreeRTOS]((https://www.freertos.org) you're very likely to get a hard fault to add to the joy (stacks and task control blocks live close together, so running off the end of your stack is likely to trample on the stored state of another task, resulting in it trying to access invalid memory).
+This can't be done if the MCU only has real memory. Stack overflow may be caught or not. If you're lucky there'll be enough information left behind for you to use the debugger to find the reason for the resulting crash straight away, if not it could take a while. Under [FreeRTOS](https://www.freertos.org) you're very likely to get a hard fault to add to the joy (stacks and task control blocks live close together, so running off the end of your stack is likely to trample on the stored state of another task, resulting in it trying to access invalid memory).
 
 The Python program `stack_usage.py` is intended to help with this (it's not a panacea, though! if you have [AdaCore](https://www.adacore.com) support, you'll be better off using [GNATstack](https://www.adacore.com/gnatpro/toolsuite/gnatstack)).
 
-The initial motivation for this work was a hard fault encountered while writing a test program to check that Ada [timing events](http://www.ada-auth.org/standards/rm12_w_tc1/html/RM-D-15.html) work properly (well, usably) with the [FreeRTOS]((https://www.freertos.org)-based [Cortex GNAT RTS](https://github.com/simonjwright/cortex-gnat-rts).
+The initial motivation for this work was a hard fault encountered while writing a test program to check that Ada [timing events](http://www.ada-auth.org/standards/rm12_w_tc1/html/RM-D-15.html) work properly (well, usably) with the [FreeRTOS](https://www.freertos.org)-based [Cortex GNAT RTS](https://github.com/simonjwright/cortex-gnat-rts).
 
 ## Requirements ##
 
@@ -39,7 +39,7 @@ Notes:
 
 ## Case study ##
 
-As noted above, the initial motivation for this work was a hard fault encountered while writing a test program to check that Ada [timing events](http://www.ada-auth.org/standards/rm12_w_tc1/html/RM-D-15.html) work properly (well, usably) with the [FreeRTOS]((https://www.freertos.org)-based [Cortex GNAT RTS](https://github.com/simonjwright/cortex-gnat-rts).
+As noted above, the initial motivation for this work was a hard fault encountered while writing a test program to check that Ada [timing events](http://www.ada-auth.org/standards/rm12_w_tc1/html/RM-D-15.html) work properly (well, usably) with the [FreeRTOS](https://www.freertos.org)-based [Cortex GNAT RTS](https://github.com/simonjwright/cortex-gnat-rts).
 
 Timing events should, per [ARM D.15(25)](http://www.ada-auth.org/standards/rm12_w_tc1/html/RM-D-15.html#p25), "be executed directly by the real-time clock interrupt mechanism". This wasn't done in Cortex GNAT RTS, because of ensuring proper handling of inter-task and inter-interrupt protection (especially tricky with the micro:bit, because it uses a cortex-M0 part); instead, a highest-priority task checks timings and runs handlers when required.
 
@@ -79,7 +79,7 @@ and are implemented by the compiler as a wrapper, which performs any locking and
 
 It turned out that a lot of the problem was that the standard compilation options used included `-O0` (no optimisation), and this led to the wrapper procedure (see above) using 300 bytes more stack than the 40 bytes it used with `-Og` (which "offer[s] a reasonable level of optimization while maintaining fast compilation and a good debugging experience").
 
-A further improvement was to eliminate the timer task's secondary stack and bump its main stack:
+A further improvement was to eliminate the `Timer` task's secondary stack and bump its main stack:
 ``` ada
    task Timer
    with
@@ -122,7 +122,7 @@ To combine this saved RTS information with the `events` program's data,
     ~/cortex-gnat-rts/test-microbit/.build/*.ci
 ```
 
-Looking at `events.csv`, we find that `ada.real_time.timing_events.timerTKVIP` (called during elaboration to create the Timer task) uses 264 bytes (from the environment task's stack). The `system.tasking.restricted.stages.wrapper` procedure uses 40 bytes of the time task's stack, and calls (via a pointer, so invisibly to `stack_usage.py`) `ada.real_time.timing_events.timerTKB`, the task's body, which uses 296 bytes (including 64 bytes used by `ada.real_time.timing_events.process_queued_events`).
+Looking at `events.csv`, we find that `ada.real_time.timing_events.timerTKVIP` (called during elaboration to create the `Timer` task) uses 264 bytes (from the environment task's stack). The `system.tasking.restricted.stages.wrapper` procedure uses 40 bytes of the `Timer` task's stack, and calls (via a pointer, so invisibly to `stack_usage.py`) `ada.real_time.timing_events.timerTKB`, the task's body, which uses 296 bytes (including 64 bytes used by `ada.real_time.timing_events.process_queued_events`).
 
 Again, `stack_usage.py` can't trace into the handler procedure, because it's called via a pointer:
 ``` ada
