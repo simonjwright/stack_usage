@@ -17,6 +17,7 @@
 import csv
 import getopt
 import os
+import pickle
 import ply.lex as lex
 import ply.yacc as yacc
 import re
@@ -418,20 +419,28 @@ def main():
         sys.stderr.write('flags:\n')
         sys.stderr.write('-h, --help:        '
                          + 'output this message\n')
+        sys.stderr.write('-s, --save=file:   '
+                         + 'save data in file\n')
+        sys.stderr.write('-l, --load=file:   '
+                         + 'restore previously saved data\n')
+        sys.stderr.write('-o, --output=file: '
+                         + 'file for CSV output (D=stack_usage.csv)\n')
         sys.stderr.write('-d, --diagnostics: '
                          + 'output diagnostic info on parsing\n')
 
     try:
         opts, args = getopt.getopt(
             sys.argv[1:],
-            'hd',
-            ('help', 'diagnostics', ))
+            'hs:l:o:d',
+            ('help', 'save=', 'load=', 'output=', 'diagnostics', ))
     except getopt.GetoptError:
         usage()
         sys.exit(1)
 
     input = sys.stdin
-    output_file = ''
+    output_file = 'stack_usage.csv'
+    do_save = False; save_file = ''
+    do_load = False; load_file = ''
     global verbosity; verbosity = False
 
     for o, v in opts:
@@ -440,6 +449,14 @@ def main():
             sys.exit()
         if o in ('-v', '--verbose'):
             verbosity = True
+        if o in ('-l', '--load'):
+            do_load = True
+            load_file = v
+        if o in ('-s', '--save'):
+            do_save = True
+            save_file = v
+        if o in ('-o', '--output'):
+            output_file = v
 
     if len(args) == 0:
         usage()
@@ -450,13 +467,21 @@ def main():
     # create the parser (global, for p_error())
     global parser; parser = yacc.yacc()
 
-    # parse the input files, collect the data
+    # check for load of previous run
+    if do_load:
+        graphs = pickle.load(open(load_file, "rb"))
+    else:
+        graphs = Graphs()
 
-    graphs = Graphs()
+    # parse the input files, collect the data
     for f in args:
         graphs.add_ci_file(f)
 
-    csv_file = open('stack_usage.csv', mode='w')
+    # save if requested
+    if do_save:
+        pickle.dump(graphs, open(save_file, "wb"))
+
+    csv_file = open(output_file, mode='w')
     csv_writer = csv.DictWriter(csv_file, ('Caller', 'Depth'))
     csv_writer.writeheader()
 
