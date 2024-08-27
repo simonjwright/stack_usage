@@ -1,7 +1,7 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-#  Copyright (C) Simon Wright <simon@pushface.org>
+#  Copyright (C) 2020-2024 Simon Wright <simon@pushface.org>
 
 #  This package is free software; you can redistribute it and/or
 #  modify it under terms of the BSD 3-Clause License.
@@ -16,13 +16,11 @@
 
 import csv
 import getopt
-import os
 import pickle
 import ply.lex as lex
 import ply.yacc as yacc
 import re
 import sys
-import time
 
 # ----------------------------------------------------------------------
 # Object model
@@ -59,13 +57,15 @@ class Node(object):
         self.title = ''
         # symbol is the subprogram's symbol
         self.symbol = ''
-        # XXX I don't remember what this is
+        # source file:line:col
         self.source = ''
 
 class InternalNode(Node):
     """A subprogram declared in this unit."""
     def __init__(self):
         super(InternalNode, self).__init__()
+        # the unqualified name
+        self.name= ''
         # the amount of stack used in this subprogram
         self.static_stack = 0
         # the number of dynamic objects (?)
@@ -96,7 +96,7 @@ class Edge:
         self.source = ''
         # target is the called subprogram
         self.target = ''
-        # XXX not sure what this is
+        # the source file:line:char of the call
         self.label = None
     def __str__(self):
         result = "edge: from: %s to: %s" % (self.source, self.target)
@@ -109,7 +109,7 @@ class Edge:
 class Graphs:
     def __init__(self):
         self.graphs = []
-        # sources is a map {sourcename:(internal_node, stack_used)}
+        # sources is a map {sourcename:[internal_node, usage]}
         self.sources = {}
         # edges is a map {sourcename:[targetname, ...]}
         self.edges = {}
@@ -147,34 +147,67 @@ class Graphs:
             else:
                 self.edges[src] = (tgt, )
     def _resolve(self, name):
-        """Calculate the total stack depth required for @name.
+        """Calculate the total usage required for @name.
+        If sources[name][1] is not None, the calculation has already
+        been done, and is cached here.
         If sources[name][1] is None, this means we have to
-        calculate it as sources[name][0].static_stack + the max of
-        all the nodes called (recursively).
-        If not None, we've already done this calculation (it contains
-        the cached result).
+        calculate it.
+        The return is a tuple:
+        * [0] is sources[name][0].static_stack + the max of all the
+           nodes called (recursively).
+        * [1] is True if this node calls itself, or if any of
+           its called tree are recursive.
+        * [2] is True if this node uses dynamic storage, or if any
+          its called tree do.
+        * [3] is True if this node makes calls via subprogram pointers,
+          or if any of its called tree do.
         """
         if not name in self.sources:
             if not name in self.missing:
                 self.missing += [name, ]
                 warning("callee '%s' not found" % name)
-            return 0
+            return (0, False, False, False)
         if not self.sources[name][1]:
+            # That's the usage data. If None, we haven't passed this
+            # way before.
+            stack = self.sources[name][0].static_stack
+            called_stacks = []
+            recursive = False
+            dynamic = self.sources[name][0].dynamic_objects != 0
+            indirect = False
+            max_called_stack = 0
             if name in self.edges:
                 called = self.edges[name]
-                stacks = [self._resolve(c) for c in called if c != name]
-                max_called_stack = max(stacks)
-            else:
-                max_called_stack = 0
-            self.sources[name][1] = self.sources[name][0].static_stack \
-                + max_called_stack
+                recursive = name in called
+                indirect = '__indirect_call' in called
+                for c in called:
+                    if c != name:
+                        # get the info tuple
+                        info = self._resolve(c)
+                        called_stacks += [info[0],]
+                        recursive = recursive or info[1]
+                        dynamic = dynamic or info[2]
+                        indirect = indirect or info[3]
+                        if len(called_stacks) != 0:
+                            max_called_stack = max(called_stacks)
+            self.sources[name][1] = \
+                (self.sources[name][0].static_stack + max_called_stack,
+                 recursive,
+                 dynamic,
+                 indirect)
         return self.sources[name][1]
     def usage(self):
-        """Returns the results, sorted by caller, as a list of 2-element
-        lists: [(<name with __ replaced by .>, <depth>)]
+        """Returns the results, sorted by caller, as a list of
+        tuples:
+        [(<name with __ replaced by .>,
+          unqualified Ada name,
+          (depth, recursion, dynamic_objects, indirect))]
         """
         names = self.sources.keys()
-        return sorted([(n.replace('__', '.'), self._resolve(n)) for n in names],
+        return sorted([(n.replace('__', '.'),
+                        self.sources[n][0].name,
+                        self._resolve(n)) \
+                       for n in names],
                       key=lambda el: el[0])
 
 # ----------------------------------------------------------------------
@@ -232,6 +265,11 @@ def p_class(p):
           PARENT COLON STRING \
           VIRTUALS COLON STRING \
           CLOSE_BRACE
+        | CLASS OPEN_BRACE \
+          CLASSNAME COLON STRING \
+          LABEL COLON STRING \
+          VIRTUALS COLON STRING \
+          CLOSE_BRACE
     '''
     #p[0] = "class, ignored"
 
@@ -253,6 +291,11 @@ def p_node_content(p):
 
 # Matcher for the 'label' of an internal node (a subprogram in this CI
 # file)
+#
+# [1] is the unqualified Ada name
+# [2] is the source file:line:col
+# [3] is the static number of bytes
+# [4] is the number of dynamic objects (?)
 internal_matcher = re.compile(r'^(\S+)\\n(.*)\\n(\d+).*\\n(\d+).*$')
 
 def p_internal_node(p):
@@ -260,9 +303,9 @@ def p_internal_node(p):
     internal_node : LABEL COLON STRING
     '''
     p[0] = InternalNode()
-    p[0].content = p[3]
     match = internal_matcher.match(p[3])
     if match:
+        p[0].name = match.group(1)
         p[0].source = match.group(2)
         p[0].static_stack = int(match.group(3))
         p[0].dynamic_objects = int(match.group(4))
@@ -279,6 +322,10 @@ def p_external_node(p):
     '''
     p[0] = ExternalNode()
     p[0].content = p[3]
+    # Discard obscure target, precedes an '__indirect_call'. Sometimes.
+    if p[3] == 'Indirect Call Placeholder':
+        # Discard obscure target, precedes an '__indirect_call'. Sometimes.
+        return
     match = external_matcher.match(p[3])
     if match:
         p[0].source = match.group(2)
@@ -475,6 +522,7 @@ def main():
 
     # parse the input files, collect the data
     for f in args:
+        sys.stderr.write("processing %s\n" % f)
         graphs.add_ci_file(f)
 
     # save if requested
@@ -482,11 +530,18 @@ def main():
         pickle.dump(graphs, open(save_file, "wb"))
 
     csv_file = open(output_file, mode='w')
-    csv_writer = csv.DictWriter(csv_file, ('Caller', 'Depth'))
+    csv_writer = csv.DictWriter\
+        (csv_file, ('Caller', 'Depth', 'Rec', 'Dyn', 'Ind'))
     csv_writer.writeheader()
 
     for row in graphs.usage():
-        csv_writer.writerow({'Caller':row[0], 'Depth':row[1]})
+        csv_writer.writerow\
+            ({'Caller':row[0],
+              # this is the unqualified Ada name
+              'Depth':row[2][0],
+              'Rec':row[2][1],
+              'Dyn':row[2][2],
+              'Ind':row[2][3]})
 
     csv_file.close()
 
