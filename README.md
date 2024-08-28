@@ -122,7 +122,20 @@ To combine this saved RTS information with the `events` program's data,
     ~/cortex-gnat-rts/test-microbit/.build/*.ci
 ```
 
-Looking at `events.csv`, we find that `ada.real_time.timing_events.timerTKVIP` (called during elaboration to create the `Timer` task) uses 264 bytes (from the environment task's stack). The `system.tasking.restricted.stages.wrapper` procedure uses 40 bytes of the `Timer` task's stack, and calls (via a pointer, so invisibly to `stack_usage.py`) `ada.real_time.timing_events.timerTKB`, the task's body, which uses 296 bytes (including 64 bytes used by `ada.real_time.timing_events.process_queued_events`).
+Looking at `events.csv`,
+
+| Caller | Depth | Rec | Dyn | Ind |
+| ------ | ----- | --- | --- | --- |
+| ada.real_time.timing_events.timerTKB	|360	|False	|False	|True |
+| ada.real_time.timing_events.timerTKVIP	|272	|False	|True	|False |
+| --- |
+| system.tasking.restricted.stages.wrapper	|40	|False	|True	|True |
+
+we find that 
+
+* `ada.real_time.timing_events.timerTKVIP` (called during elaboration to create the `Timer` task) uses 272 bytes (from the environment task's stack), doesn't involve recursion (**Rec**), uses dynamic objects (variable-length items in declarations) (**Dyn**), and doesn't make any calls via subprogram pointers (**Ind**).
+* The `system.tasking.restricted.stages.wrapper` procedure uses 40 bytes of the `Timer` task's stack, and calls (via a pointer, so invisibly to `stack_usage.py`) 
+* `ada.real_time.timing_events.timerTKB`, the task's body, which uses 360 bytes (including 56 bytes used by `ada.real_time.timing_events.process_queued_events`).
 
 Again, `stack_usage.py` can't trace into the handler procedure, because it's called via a pointer:
 ``` ada
@@ -130,27 +143,31 @@ Again, `stack_usage.py` can't trace into the handler procedure, because it's cal
       Handler.all (Timing_Event (Next_Event.all));
    end if;
 ```
-so we have to use our knowledge of the actual handlers to find that it's `event_support.led_event_handling.handleN` (312 bytes), wrapped by `event_support.led_event_handling.handleP` (which organises locking) for a total of 328 bytes.
+so we have to use our knowledge of the actual handlers to find that it's `event_support.led_event_handling.handleN` (368 bytes), wrapped by `event_support.led_event_handling.handleP` (which organises locking) for a total of 384 bytes.
 
-The total stack usage for the timer task is then predicted to be 40 + 296 + 328 = 664 bytes.
+The total stack usage for the timer task is then predicted to be 40 + 360 + 384 = 784 bytes.
 
-This is a worst-case value: on [measuring the actual free space](https://github.com/simonjwright/cortex-gnat-rts/wiki/MeasuringStackUsage), the actual peak usage was 424 bytes.
+This is a worst-case value: on [measuring the actual free space](https://github.com/simonjwright/cortex-gnat-rts/wiki/MeasuringStackUsage), the actual peak usage was 488 bytes.
 
 Why?!
 
-The worst-case usage for a particular subprogram is the amount it uses for its own purposes (register storage, local variables) plus the maximum used by any of the subprograms it calls. If a particular execution pattern doesn't call that maximal subprogram, then the actual usage will be lower. In this case, one of the most expensive called subprograms was 64-bit scaled arithmetic division, at 192 bytes, called by `Ada.Real_Time.Time_Of` at 248 bytes. I'm assuming that this was never actually invoked.
+The worst-case usage for a particular subprogram is the amount it uses for its own purposes (register storage, local variables) plus the maximum used by any of the subprograms it calls. If a particular execution pattern doesn't call that maximal subprogram, then the actual usage will be lower. In this case, one of the most expensive called subprograms was 64-bit scaled arithmetic division, at 192 bytes, called by `Ada.Real_Time.Time_Of` at 344 bytes. I'm assuming that this was never actually invoked.
 
 ## Restrictions/To Do ##
 
 ### Ignored subprograms ###
 
-The tool currently ignores
+The tool currently can't report on usage for
 
-* calls to subprograms not compiled with the required options (e.g. `memcmp`)
-* dynamic objects (for example, `declare` blocks with variables sized at runtime)
-* dispatching calls
+* calls to subprograms not compiled with the required options (e.g. `memcmp`) which may come from GCC or newlib. These are reported to standard error as e.g. `callee 'memcmp' not found`.  
+Inlined subprograms are also reported like this, but they will have been included with the caller.
+* dispatching calls, because the compiler doesn't report the calls.
 
-At the very least it should mark the subprograms where there's a potential problem.
+The tool marks subprograms where the subroutine itself, or one that it calls directly or indirectly, involves
+
+* dynamic objects (for example, `declare` blocks with variables sized at runtime). The **Dyn** column in the spreadsheet marks these.
+* calls via subprogram pointers. The **Ind** column in the spreadsheet marks these.
+* recursion. The **Rec** column in the spreadsheet marks these.
 
 ### Detailed reports ###
 
